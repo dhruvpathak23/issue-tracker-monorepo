@@ -1,0 +1,2 @@
+# This file tells Railway which services to deploy
+# Railway will look for backend/.railway.toml and frontend/.railway.toml
