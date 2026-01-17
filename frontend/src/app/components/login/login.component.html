@@ -1,0 +1,63 @@
+<div class="login-container">
+  <div class="login-card">
+    <h1>Issue Tracker</h1>
+    <h2>Login</h2>
+
+    <form [formGroup]="loginForm" (ngSubmit)="onSubmit()">
+      <div class="form-group">
+        <label for="username">Username or Email</label>
+        <input
+          type="text"
+          id="username"
+          formControlName="username"
+          placeholder="Enter your username or email"
+          [class.is-invalid]="username && username.touched && username.invalid"
+        />
+        <small *ngIf="username && username.touched && username.invalid" class="error">
+          {{ username.hasError('required') ? 'Username is required' : 'Username must be at least 3 characters' }}
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label for="password">Password</label>
+        <div class="password-input">
+          <input
+            [type]="showPassword ? 'text' : 'password'"
+            id="password"
+            formControlName="password"
+            placeholder="Enter your password"
+            [class.is-invalid]="password && password.touched && password.invalid"
+          />
+          <button
+            type="button"
+            class="toggle-password"
+            (click)="togglePassword()"
+            tabindex="-1"
+          >
+            {{ showPassword ? '👁️' : '👁️‍🗨️' }}
+          </button>
+        </div>
+        <small *ngIf="password && password.touched && password.invalid" class="error">
+          {{ password.hasError('required') ? 'Password is required' : 'Password must be at least 6 characters' }}
+        </small>
+      </div>
+
+      <div *ngIf="errorMessage" class="alert alert-error">
+        {{ errorMessage }}
+      </div>
+
+      <button
+        type="submit"
+        class="btn btn-primary"
+        [disabled]="loginForm.invalid || isLoading"
+      >
+        {{ isLoading ? 'Logging in...' : 'Login' }}
+      </button>
+    </form>
+
+    <p class="signup-link">
+      Don't have an account?
+      <a (click)="navigateToRegister()" href="javascript:void(0)">Sign up</a>
+    </p>
+  </div>
+</div>

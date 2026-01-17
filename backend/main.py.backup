@@ -1,0 +1,756 @@
+from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBearer
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List
+from datetime import datetime, timedelta
+from uuid import uuid4
+from enum import Enum
+from sqlalchemy.orm import Session
+from database import engine, get_db, Base, IssueModel, UserModel
+from auth import hash_password, verify_password, create_access_token, get_current_user
+
+class StatusEnum(str, Enum):
+    open = "open"
+    closed = "closed"
+
+class PriorityEnum(str, Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+app = FastAPI(
+    title="Issue Tracker API",
+    description="A comprehensive issue tracking system with database persistence",
+    version="1.0.0"
+)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ==================== AUTH MODELS ====================
+
+class UserRegister(BaseModel):
+    email: str = Field(..., description="User email")
+    username: str = Field(..., min_length=3, max_length=50, description="Username")
+    password: str = Field(..., min_length=6, description="Password")
+    fullName: Optional[str] = Field(None, description="Full name")
+
+class UserLogin(BaseModel):
+    username: str = Field(..., description="Username or email")
+    password: str = Field(..., description="Password")
+
+class TokenResponse(BaseModel):
+    access_token: str = Field(..., description="JWT access token")
+    token_type: str = Field(default="bearer", description="Token type")
+    user: dict = Field(..., description="User information")
+
+class UserResponse(BaseModel):
+    id: str = Field(..., description="User ID")
+    email: str = Field(..., description="User email")
+    username: str = Field(..., description="Username")
+    fullName: Optional[str] = Field(None, description="Full name")
+    isActive: bool = Field(default=True, description="Is user active")
+    createdAt: datetime = Field(..., description="Creation timestamp")
+
+    class Config:
+        from_attributes = True
+
+# ==================== ISSUE MODELS ====================
+
+class IssueBase(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200, description="Issue title")
+    status: StatusEnum = Field(default=StatusEnum.open, description="Issue status")
+    priority: PriorityEnum = Field(default=PriorityEnum.medium, description="Issue priority")
+    assignee: Optional[str] = Field(None, max_length=100, description="Person assigned to issue")
+
+    @validator('title')
+    def title_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Title cannot be empty or whitespace')
+        return v.strip()
+
+class Issue(IssueBase):
+    id: str = Field(..., description="Unique issue identifier")
+    createdAt: datetime = Field(..., description="Creation timestamp")
+    updatedAt: datetime = Field(..., description="Last update timestamp")
+
+    class Config:
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "title": "Fix login bug",
+                "status": "open",
+                "priority": "high",
+                "assignee": "alice",
+                "createdAt": "2024-01-16T12:00:00",
+                "updatedAt": "2024-01-16T12:00:00"
+            }
+        }
+
+class IssuesResponse(BaseModel):
+    items: List[Issue] = Field(..., description="List of issues")
+    total: int = Field(..., description="Total number of issues matching criteria")
+    page: int = Field(..., description="Current page number")
+    pageSize: int = Field(..., description="Number of items per page")
+
+class ErrorResponse(BaseModel):
+    detail: str = Field(..., description="Error message")
+
+_db: List[Issue] = []
+
+def _seed(db: Session):
+    """Seed database with sample data"""
+    # Check if data already exists
+    existing_users = db.query(UserModel).first()
+    if existing_users:
+        return
+    
+    # Create sample users
+    users_data = [
+        {"username": "alice", "email": "alice@example.com", "fullName": "Alice Smith"},
+        {"username": "bob", "email": "bob@example.com", "fullName": "Bob Johnson"},
+    ]
+    
+    user_ids = {}
+    now = datetime.utcnow()
+    
+    for user_data in users_data:
+        user_id = str(uuid4())
+        user_ids[user_data["username"]] = user_id
+        new_user = UserModel(
+            id=user_id,
+            email=user_data["email"],
+            username=user_data["username"],
+            password=hash_password("password123"),
+            fullName=user_data["fullName"],
+            isActive=True,
+            createdAt=now,
+            updatedAt=now,
+        )
+        db.add(new_user)
+    
+    db.commit()
+    
+    # Create sample issues for the users
+    sample_issues = [
+        {"userId_key": "alice", "title": "Fix login authentication", "status": "open", "priority": "high", "assignee": "alice"},
+        {"userId_key": "bob", "title": "Update user profile page", "status": "open", "priority": "medium", "assignee": "bob"},
+        {"userId_key": "alice", "title": "Database optimization", "status": "closed", "priority": "low", "assignee": None},
+        {"userId_key": "alice", "title": "Implement dark mode", "status": "open", "priority": "medium", "assignee": "alice"},
+        {"userId_key": "bob", "title": "Fix password reset email", "status": "open", "priority": "high", "assignee": "bob"},
+        {"userId_key": "alice", "title": "Add two-factor authentication", "status": "closed", "priority": "high", "assignee": "alice"},
+        {"userId_key": "bob", "title": "Improve API response time", "status": "open", "priority": "medium", "assignee": None},
+        {"userId_key": "bob", "title": "Update documentation", "status": "closed", "priority": "low", "assignee": "bob"},
+        {"userId_key": "alice", "title": "Mobile app responsive design", "status": "open", "priority": "high", "assignee": "alice"},
+        {"userId_key": "alice", "title": "Implement user notifications", "status": "open", "priority": "medium", "assignee": None},
+        {"userId_key": "bob", "title": "Fix CSS styling issues", "status": "closed", "priority": "low", "assignee": "bob"},
+        {"userId_key": "alice", "title": "Add data export functionality", "status": "open", "priority": "medium", "assignee": "alice"},
+    ]
+    
+    for issue_data in sample_issues:
+        db_issue = IssueModel(
+            id=str(uuid4()),
+            userId=user_ids[issue_data["userId_key"]],
+            title=issue_data["title"],
+            status=issue_data["status"],
+            priority=issue_data["priority"],
+            assignee=issue_data["assignee"],
+            createdAt=now,
+            updatedAt=now,
+        )
+        db.add(db_issue)
+    
+    db.commit()
+
+
+def _init_db():
+    """Initialize database with seed data on startup"""
+    from sqlalchemy.orm import Session as SQLSession
+    db = SQLSession(get_db.__wrapped__())
+    try:
+        _seed(db)
+    finally:
+        db.close()
+
+@app.on_event("startup")
+def startup_event():
+    """Initialize database on startup"""
+    from sqlalchemy.orm import sessionmaker
+    from database import engine
+    
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    try:
+        _seed(db)
+    finally:
+        db.close()
+
+
+@app.get("/", response_class=HTMLResponse, tags=["System"])
+def root(db: Session = Depends(get_db)):
+    """Root endpoint with API UI and live database viewer"""
+    # Get database statistics
+    total_users = db.query(UserModel).count()
+    total_issues = db.query(IssueModel).count()
+    
+    # Build users table HTML
+    users = db.query(UserModel).all()
+    users_html = ""
+    for user in users:
+        active_status = "✓ Active" if user.isActive else "✗ Inactive"
+        active_color = "green" if user.isActive else "red"
+        full_name = user.fullName or "N/A"
+        users_html += f'<tr><td style="padding: 10px; border-bottom: 1px solid #ddd;">{user.username}</td>'
+        users_html += f'<td style="padding: 10px; border-bottom: 1px solid #ddd;">{user.email}</td>'
+        users_html += f'<td style="padding: 10px; border-bottom: 1px solid #ddd;">{full_name}</td>'
+        users_html += f'<td style="padding: 10px; border-bottom: 1px solid #ddd; color: {active_color};"><strong>{active_status}</strong></td></tr>\n'
+    
+    # Build issues table HTML
+    issues_by_user = db.query(UserModel.username, IssueModel.title, IssueModel.status, IssueModel.priority).join(IssueModel).all()
+    issues_html = ""
+    status_colors = {"open": "#ff9800", "closed": "#4caf50"}
+    priority_colors = {"low": "#4caf50", "medium": "#ff9800", "high": "#f44336"}
+    
+    for username, title, status, priority in issues_by_user:
+        status_color = status_colors.get(status, "#999")
+        priority_color = priority_colors.get(priority, "#999")
+        issues_html += f'<tr><td style="padding: 10px; border-bottom: 1px solid #ddd;">{username}</td>'
+        issues_html += f'<td style="padding: 10px; border-bottom: 1px solid #ddd;">{title}</td>'
+        issues_html += f'<td style="padding: 10px; border-bottom: 1px solid #ddd;"><span style="background: {status_color}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.85em;">{status.upper()}</span></td>'
+        issues_html += f'<td style="padding: 10px; border-bottom: 1px solid #ddd;"><span style="background: {priority_color}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.85em;">{priority.upper()}</span></td></tr>\n'
+    
+    no_issues = '<tr><td colspan="4" style="text-align: center; padding: 20px; color: #999;">No issues found</td></tr>'
+    issues_display = issues_html if issues_html else no_issues
+    
+    html = '<!DOCTYPE html><html lang="en"><head>' + \
+           '<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">' + \
+           '<meta http-equiv="refresh" content="5"><title>Issue Tracker API - Database Viewer</title>' + \
+           '<style>' + \
+           '* { margin: 0; padding: 0; box-sizing: border-box; }' + \
+           'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }' + \
+           '.container { background: white; border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); max-width: 1200px; margin: 0 auto; padding: 40px; }' + \
+           'header { text-align: center; margin-bottom: 40px; border-bottom: 3px solid #667eea; padding-bottom: 20px; }' + \
+           'h1 { color: #333; font-size: 2.5em; margin-bottom: 10px; }' + \
+           '.version { color: #666; font-size: 1.1em; margin-bottom: 10px; }' + \
+           '.status { display: inline-block; background: #10b981; color: white; padding: 8px 16px; border-radius: 20px; font-size: 0.9em; font-weight: 600; }' + \
+           '.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 30px 0; }' + \
+           '.stat-box { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }' + \
+           '.stat-number { font-size: 2.5em; font-weight: bold; margin-bottom: 5px; }' + \
+           '.stat-label { font-size: 1em; opacity: 0.9; }' + \
+           '.database-section { margin: 40px 0; }' + \
+           '.section-title { color: #333; font-size: 1.8em; margin: 30px 0 20px 0; padding-bottom: 10px; border-bottom: 2px solid #667eea; }' + \
+           'table { width: 100%; border-collapse: collapse; background: #f9fafb; }' + \
+           'th { background: #667eea; color: white; padding: 12px; text-align: left; font-weight: 600; }' + \
+           'td { padding: 10px; border-bottom: 1px solid #ddd; }' + \
+           'tr:hover { background: #f0f0f0; }' + \
+           'footer { text-align: center; margin-top: 40px; padding-top: 20px; border-top: 2px solid #e5e7eb; color: #999; font-size: 0.9em; }' + \
+           '.refresh-note { background: #e3f2fd; border-left: 4px solid #2196f3; padding: 10px 15px; margin: 20px 0; border-radius: 4px; color: #1565c0; font-size: 0.9em; }' + \
+           '</style></head><body><div class="container">' + \
+           '<header><h1>🎯 Issue Tracker</h1><div class="version">Backend API v1.0.0</div><span class="status">✓ Running</span></header>' + \
+           '<div class="refresh-note">🔄 This page refreshes every 5 seconds to show live database updates</div>' + \
+           '<div class="stats">' + \
+           f'<div class="stat-box"><div class="stat-number">{total_users}</div><div class="stat-label">Total Users</div></div>' + \
+           f'<div class="stat-box"><div class="stat-number">{total_issues}</div><div class="stat-label">Total Issues</div></div>' + \
+           '</div>' + \
+           '<div class="database-section">' + \
+           '<h2 class="section-title">👥 Users</h2>' + \
+           '<table><thead><tr><th>Username</th><th>Email</th><th>Full Name</th><th>Status</th></tr></thead><tbody>' + \
+           users_html + \
+           '</tbody></table></div>' + \
+           '<div class="database-section">' + \
+           '<h2 class="section-title">📋 Issues</h2>' + \
+           '<table><thead><tr><th>Owner</th><th>Title</th><th>Status</th><th>Priority</th></tr></thead><tbody>' + \
+           issues_display + \
+           '</tbody></table></div>' + \
+           '<footer><p>📱 Frontend: <a href="http://localhost:4200" style="color: #667eea; text-decoration: none;">http://localhost:4200</a></p>' + \
+           '<p>Made with ❤️ | SQLite Database | FastAPI Backend</p></footer>' + \
+           '</div></body></html>'
+    
+    return html
+            
+            <div class="database-section">
+                <h2 class="section-title">👥 Users</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Email</th>
+                            <th>Full Name</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {users_html}
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="database-section">
+                <h2 class="section-title">📋 Issues</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Owner</th>
+                            <th>Title</th>
+                            <th>Status</th>
+                            <th>Priority</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {issues_display}
+                    </tbody>
+                </table>
+            </div>
+            
+            <footer>
+                <p>📱 Frontend: <a href="http://localhost:4200" style="color: #667eea; text-decoration: none;">http://localhost:4200</a></p>
+                <p>Made with ❤️ | SQLite Database | FastAPI Backend</p>
+            </footer>
+        </div>
+    </body>
+    </html>
+    """
+    return html.format(total_users=total_users, total_issues=total_issues, users_html=users_html, issues_display=issues_display)
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="refresh" content="5">
+        <title>Issue Tracker API - Database Viewer</title>
+        <style>
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }}
+            
+            .container {{
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 40px;
+            }}
+            
+            header {{
+                text-align: center;
+                margin-bottom: 40px;
+                border-bottom: 3px solid #667eea;
+                padding-bottom: 20px;
+            }
+            
+            h1 {{
+                color: #333;
+                font-size: 2.5em;
+                margin-bottom: 10px;
+            }}
+            
+            .version {{
+                color: #666;
+                font-size: 1.1em;
+                margin-bottom: 10px;
+            }}
+            
+            .status {{
+                display: inline-block;
+                background: #10b981;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 20px;
+                font-size: 0.9em;
+                font-weight: 600;
+            }}
+            
+            .stats {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin: 30px 0;
+            }}
+            
+            .stat-box {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 20px;
+                border-radius: 8px;
+                text-align: center;
+            }}
+            
+            .stat-number {{
+                font-size: 2.5em;
+                font-weight: bold;
+                margin-bottom: 5px;
+            }}
+            
+            .stat-label {{
+                font-size: 1em;
+                opacity: 0.9;
+            }}
+            
+            .database-section {{
+                margin: 40px 0;
+            }}
+            
+            .section-title {{
+                color: #333;
+                font-size: 1.8em;
+                margin: 30px 0 20px 0;
+                padding-bottom: 10px;
+                border-bottom: 2px solid #667eea;
+            }}
+            
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                background: #f9fafb;
+            }}
+            
+            th {{
+                background: #667eea;
+                color: white;
+                padding: 12px;
+                text-align: left;
+                font-weight: 600;
+            }}
+            
+            td {{
+                padding: 10px;
+                border-bottom: 1px solid #ddd;
+            }}
+            
+            tr:hover {{
+                background: #f0f0f0;
+            }}
+            
+            footer {{
+                text-align: center;
+                margin-top: 40px;
+                padding-top: 20px;
+                border-top: 2px solid #e5e7eb;
+                color: #999;
+                font-size: 0.9em;
+            }}
+            
+            .refresh-note {{
+                background: #e3f2fd;
+                border-left: 4px solid #2196f3;
+                padding: 10px 15px;
+                margin: 20px 0;
+                border-radius: 4px;
+                color: #1565c0;
+                font-size: 0.9em;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <header>
+                <h1>🎯 Issue Tracker</h1>
+                <div class="version">Backend API v1.0.0</div>
+                <span class="status">✓ Running</span>
+            </header>
+            
+            <div class="refresh-note">
+                🔄 This page refreshes every 5 seconds to show live database updates
+            </div>
+            
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-number">{total_users}</div>
+                    <div class="stat-label">Total Users</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">{total_issues}</div>
+                    <div class="stat-label">Total Issues</div>
+                </div>
+            </div>
+            
+            <div class="database-section">
+                <h2 class="section-title">👥 Users</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Email</th>
+                            <th>Full Name</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {users_html}
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="database-section">
+                <h2 class="section-title">📋 Issues</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Owner</th>
+                            <th>Title</th>
+                            <th>Status</th>
+                            <th>Priority</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {issues_html if issues_html else '<tr><td colspan="4" style="text-align: center; padding: 20px; color: #999;">No issues found</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+            
+            <footer>
+                <p>📱 Frontend: <a href="http://localhost:4200" style="color: #667eea; text-decoration: none;">http://localhost:4200</a></p>
+                <p>Made with ❤️ | SQLite Database | FastAPI Backend</p>
+            </footer>
+        </div>
+    </body>
+    </html>
+    """
+
+
+
+# ==================== AUTH ENDPOINTS ====================
+
+@app.post("/auth/register", response_model=UserResponse, status_code=201, tags=["Auth"])
+def register(payload: UserRegister, db: Session = Depends(get_db)):
+    """Register a new user"""
+    # Check if user already exists
+    existing_user = db.query(UserModel).filter(
+        (UserModel.email == payload.email) | (UserModel.username == payload.username)
+    ).first()
+    
+    if existing_user:
+        raise HTTPException(
+            status_code=400,
+            detail="Email or username already registered"
+        )
+    
+    # Create new user
+    user_id = str(uuid4())
+    hashed_password = hash_password(payload.password)
+    
+    new_user = UserModel(
+        id=user_id,
+        email=payload.email,
+        username=payload.username,
+        password=hashed_password,
+        fullName=payload.fullName
+    )
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    return new_user
+
+
+@app.post("/auth/login", response_model=TokenResponse, tags=["Auth"])
+def login(payload: UserLogin, db: Session = Depends(get_db)):
+    """Login user and return JWT token"""
+    # Find user by username or email
+    user = db.query(UserModel).filter(
+        (UserModel.username == payload.username) | (UserModel.email == payload.username)
+    ).first()
+    
+    if not user or not verify_password(payload.password, user.password):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password"
+        )
+    
+    if not user.isActive:
+        raise HTTPException(
+            status_code=401,
+            detail="User account is inactive"
+        )
+    
+    # Create JWT token
+    access_token = create_access_token(data={"sub": user.id})
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "fullName": user.fullName
+        }
+    }
+
+
+@app.get("/auth/me", response_model=UserResponse, tags=["Auth"])
+def get_me(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get current user information"""
+    user = db.query(UserModel).filter(UserModel.id == current_user["id"]).first()
+    return user
+
+
+@app.get("/health", tags=["System"])
+def health(db: Session = Depends(get_db)):
+    """Health check endpoint"""
+    total = db.query(IssueModel).count()
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow(),
+        "issues_count": total,
+        "database": "sqlite" if "sqlite" in str(engine.url) else "postgresql"
+    }
+
+@app.get("/stats", tags=["System"])
+def get_stats(db: Session = Depends(get_db)):
+    """Get issue statistics"""
+    open_count = db.query(IssueModel).filter(IssueModel.status == "open").count()
+    closed_count = db.query(IssueModel).filter(IssueModel.status == "closed").count()
+    
+    all_issues = db.query(IssueModel).all()
+    
+    priority_counts = {
+        "high": sum(1 for issue in all_issues if issue.priority == "high"),
+        "medium": sum(1 for issue in all_issues if issue.priority == "medium"),
+        "low": sum(1 for issue in all_issues if issue.priority == "low"),
+    }
+    
+    assignees = {}
+    for issue in all_issues:
+        assignee = issue.assignee or "Unassigned"
+        assignees[assignee] = assignees.get(assignee, 0) + 1
+    
+    return {
+        "total_issues": len(all_issues),
+        "open": open_count,
+        "closed": closed_count,
+        "by_priority": priority_counts,
+        "by_assignee": assignees
+    }
+
+@app.get("/issues", response_model=IssuesResponse, tags=["Issues"])
+def list_issues(
+    search: Optional[str] = Query(None, description="Search in issue titles"),
+    status: Optional[StatusEnum] = Query(None, description="Filter by status"),
+    priority: Optional[PriorityEnum] = Query(None, description="Filter by priority"),
+    assignee: Optional[str] = Query(None, description="Filter by assignee"),
+    sort: Optional[str] = Query(None, description='Sort field: title, status, priority, createdAt, updatedAt. Prefix with - for desc'),
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    pageSize: int = Query(10, ge=1, le=100, description="Items per page"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+) -> IssuesResponse:
+    """
+    List all issues with advanced filtering and pagination
+    """
+    query = db.query(IssueModel).filter(IssueModel.userId == current_user["id"])
+    
+    if search:
+        q = search.lower()
+        query = query.filter(IssueModel.title.ilike(f"%{q}%"))
+    
+    if status:
+        query = query.filter(IssueModel.status == status)
+    
+    if priority:
+        query = query.filter(IssueModel.priority == priority)
+    
+    if assignee:
+        query = query.filter(IssueModel.assignee == assignee)
+
+    total = query.count()
+    
+    if sort:
+        reverse = sort.startswith("-")
+        key = sort.lstrip("-")
+        try:
+            if hasattr(IssueModel, key):
+                sort_column = getattr(IssueModel, key)
+                if reverse:
+                    query = query.order_by(sort_column.desc())
+                else:
+                    query = query.order_by(sort_column)
+        except Exception:
+            pass
+
+    start = max((page - 1) * pageSize, 0)
+    items = query.offset(start).limit(pageSize).all()
+
+    return IssuesResponse(items=items, total=total, page=page, pageSize=pageSize)
+
+@app.get("/issues/{issue_id}", response_model=Issue, tags=["Issues"])
+def get_issue(issue_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get a single issue by ID"""
+    issue = db.query(IssueModel).filter(IssueModel.id == issue_id).first()
+    if not issue:
+        raise HTTPException(status_code=404, detail=f"Issue with ID {issue_id} not found")
+    if issue.userId != current_user["id"]:
+        raise HTTPException(status_code=403, detail="You don't have permission to access this issue")
+    return issue
+
+@app.post("/issues", response_model=Issue, status_code=201, tags=["Issues"])
+def create_issue(payload: IssueBase, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Create a new issue"""
+    now = datetime.utcnow()
+    db_issue = IssueModel(
+        id=str(uuid4()),
+        title=payload.title,
+        status=payload.status,
+        priority=payload.priority,
+        assignee=payload.assignee,
+        userId=current_user["id"],
+        createdAt=now,
+        updatedAt=now,
+    )
+    db.add(db_issue)
+    db.commit()
+    db.refresh(db_issue)
+    return db_issue
+
+@app.put("/issues/{issue_id}", response_model=Issue, tags=["Issues"])
+def update_issue(issue_id: str, payload: IssueBase, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Update an existing issue"""
+    db_issue = db.query(IssueModel).filter(IssueModel.id == issue_id).first()
+    if not db_issue:
+        raise HTTPException(status_code=404, detail=f"Issue with ID {issue_id} not found")
+    if db_issue.userId != current_user["id"]:
+        raise HTTPException(status_code=403, detail="You don't have permission to update this issue")
+    
+    db_issue.title = payload.title
+    db_issue.status = payload.status
+    db_issue.priority = payload.priority
+    db_issue.assignee = payload.assignee
+    db_issue.updatedAt = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(db_issue)
+    return db_issue
+
+@app.delete("/issues/{issue_id}", status_code=204, tags=["Issues"])
+def delete_issue(issue_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Delete an issue by ID"""
+    db_issue = db.query(IssueModel).filter(IssueModel.id == issue_id).first()
+    if not db_issue:
+        raise HTTPException(status_code=404, detail=f"Issue with ID {issue_id} not found")
+    if db_issue.userId != current_user["id"]:
+        raise HTTPException(status_code=403, detail="You don't have permission to delete this issue")
+    
+    db.delete(db_issue)
+    db.commit()

@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+sqlalchemy
+pydantic
+pydantic-sqlalchemy==2.0.23
+alembic==1.13.1
+python-jose[cryptography]
+bcrypt
+PyJWT

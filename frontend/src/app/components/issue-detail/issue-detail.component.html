@@ -1,0 +1,57 @@
+<div class="container">
+  <div class="back-button">
+    <button class="btn btn-secondary" (click)="goBack()">← Back to Issues</button>
+  </div>
+
+  <div *ngIf="loading" class="loading">Loading issue...</div>
+
+  <div *ngIf="error && !loading" class="error">
+    {{ error }}
+  </div>
+
+  <div *ngIf="issue && !loading" class="issue-detail">
+    <div class="header">
+      <div class="title-section">
+        <h1>{{ issue.title }}</h1>
+        <div class="metadata">
+          <span [class]="'status-badge status-' + issue.status">{{ issue.status }}</span>
+          <span [class]="'priority-badge priority-' + issue.priority">{{ issue.priority }}</span>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-secondary" (click)="editIssue()">Edit</button>
+        <button class="btn btn-danger" (click)="deleteIssue()">Delete</button>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="info-section">
+        <h3>Details</h3>
+        <div class="info-row">
+          <label>ID:</label>
+          <span>{{ issue.id }}</span>
+        </div>
+        <div class="info-row">
+          <label>Status:</label>
+          <span>{{ issue.status }}</span>
+        </div>
+        <div class="info-row">
+          <label>Priority:</label>
+          <span>{{ issue.priority }}</span>
+        </div>
+        <div class="info-row">
+          <label>Assignee:</label>
+          <span>{{ issue.assignee || 'Unassigned' }}</span>
+        </div>
+        <div class="info-row">
+          <label>Created:</label>
+          <span>{{ issue.createdAt | date: 'full' }}</span>
+        </div>
+        <div class="info-row">
+          <label>Updated:</label>
+          <span>{{ issue.updatedAt | date: 'full' }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

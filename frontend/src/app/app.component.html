@@ -1,0 +1,17 @@
+<div class="app-container">
+  <nav class="navbar" *ngIf="isAuthenticated">
+    <div class="nav-content">
+      <h1 class="app-title">Issue Tracker</h1>
+      <div class="nav-links">
+        <a routerLink="/issues" routerLinkActive="active" class="nav-link">Issues</a>
+      </div>
+      <div class="user-menu" *ngIf="currentUser">
+        <span class="user-info">{{ currentUser.fullName || currentUser.username }}</span>
+        <button (click)="logout()" class="logout-btn">Logout</button>
+      </div>
+    </div>
+  </nav>
+  <main>
+    <router-outlet></router-outlet>
+  </main>
+</div>

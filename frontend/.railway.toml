@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+buildCommand = "npm run build"
+startCommand = "npx http-server dist/issue-tracker-frontend -p $PORT --gzip"
+
+[deploy]
+healthcheckPath = "/"

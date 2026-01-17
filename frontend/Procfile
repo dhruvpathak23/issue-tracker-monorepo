@@ -1,0 +1,1 @@
+web: npm run build && npx http-server dist/issue-tracker-frontend -p $PORT --gzip
