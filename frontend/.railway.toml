@@ -1,7 +1,8 @@
 [build]
 builder = "nixpacks"
-buildCommand = "npm run build"
-startCommand = "npx http-server dist/issue-tracker-frontend -p $PORT --gzip"
+buildCommand = "npm ci && npm run build"
 
 [deploy]
+startCommand = "npx http-server dist/issue-tracker-frontend -p $PORT --gzip -c-1"
 healthcheckPath = "/"
+healthcheckTimeout = 30
